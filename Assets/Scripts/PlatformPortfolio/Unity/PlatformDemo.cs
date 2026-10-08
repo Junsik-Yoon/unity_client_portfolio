@@ -23,6 +23,13 @@ public sealed class PlatformDemo : MonoBehaviour
     private bool failFriends;
     private bool failAuth;
     private bool failBackend;
+    private bool failApi;
+    private bool timeoutApi;
+    private string inventoryNextToken;
+    private bool inventoryLoaded;
+    private string apiStatus = "백엔드 로그인 후 조회할 수 있습니다.";
+    private readonly List<InventoryItem> inventoryItems = new List<InventoryItem>();
+    private IReadOnlyList<LeaderboardEntry> leaderboard;
     private string status = "종료됨";
     private string statInput = "10";
     private Vector2 scroll;
@@ -97,6 +104,81 @@ public sealed class PlatformDemo : MonoBehaviour
         var previous = loginFlow;
         loginFlow = null;
         previous?.Dispose();
+        inventoryNextToken = null;
+        inventoryLoaded = false;
+        inventoryItems.Clear();
+        leaderboard = null;
+        apiStatus = "백엔드 로그인 후 조회할 수 있습니다.";
+    }
+
+    private void ConfigureApi()
+    {
+        someBaas.SimulateApiFailure = failApi;
+        someBaas.SimulateApiTimeout = timeoutApi;
+    }
+
+    private async UniTask GetBackendLeaderboardAsync()
+    {
+        ConfigureApi();
+        apiStatus = "리더보드 요청 중";
+        Log("요청 GetLeaderboard { statisticName: sample.score, startPosition: 0, count: 5 }");
+        try
+        {
+            var response = await someBaas.GetLeaderboardAsync(BackendSession, new LeaderboardRequest("sample.score"), token);
+            leaderboard = response.Entries;
+            apiStatus = "리더보드 응답: " + leaderboard.Count + "명";
+            Log(apiStatus);
+        }
+        catch (BaasApiException error) { ReportApiError(error); throw; }
+    }
+
+    private async UniTask GetBackendInventoryAsync(bool nextPage)
+    {
+        ConfigureApi();
+        apiStatus = "인벤토리 요청 중";
+        var cursor = nextPage ? inventoryNextToken : null;
+        Log("요청 GetInventoryItems { count: 2, continuationToken: " + (cursor == null ? "없음" : "이전 응답 토큰") + " }");
+        try
+        {
+            var response = await someBaas.GetInventoryItemsAsync(BackendSession, new InventoryRequest(2, cursor), token);
+            if (!nextPage) inventoryItems.Clear();
+            inventoryItems.AddRange(response.Items);
+            inventoryNextToken = response.ContinuationToken;
+            inventoryLoaded = true;
+            apiStatus = "인벤토리 응답: " + response.Items.Count + "개 / 누적 " + inventoryItems.Count
+                + (inventoryNextToken == null ? " / 마지막 페이지" : " / 다음 페이지 있음");
+            Log(apiStatus);
+        }
+        catch (BaasApiException error) { ReportApiError(error); throw; }
+    }
+
+    private void ReportApiError(BaasApiException error)
+    {
+        apiStatus = error.ApiName + " 실패 [" + error.Code + "]: " + error.Message;
+        Log(apiStatus);
+    }
+
+    private void DrawBackendApiControls()
+    {
+        GUI.enabled = true;
+        GUILayout.Space(8);
+        GUILayout.Label("G-BaaS API · 리더보드 / 인벤토리");
+        GUILayout.Label("고정 샘플 응답입니다. 플랫폼 스탯·클라우드 데이터와 별개입니다.");
+        GUI.enabled = !busy;
+        failApi = GUILayout.Toggle(failApi, "API 서버 오류 시뮬레이션");
+        timeoutApi = GUILayout.Toggle(timeoutApi, "API 응답 시간 초과 시뮬레이션 (2초)");
+        GUI.enabled = !busy && BackendSession != null;
+        ActionButton("백엔드 리더보드 상위 5명", GetBackendLeaderboardAsync);
+        ActionButton("인벤토리 첫 페이지 / 새로고침", () => GetBackendInventoryAsync(false));
+        GUI.enabled = !busy && BackendSession != null && inventoryLoaded && inventoryNextToken != null;
+        ActionButton("인벤토리 다음 페이지", () => GetBackendInventoryAsync(true));
+        GUI.enabled = true;
+        GUILayout.Label(apiStatus);
+        if (leaderboard != null)
+            foreach (var entry in leaderboard)
+                GUILayout.Label((entry.Position + 1) + "위 · " + entry.DisplayName + " · " + entry.Value + "점");
+        foreach (var item in inventoryItems)
+            GUILayout.Label(item.DisplayName + " × " + item.Amount + " (" + item.ItemId + ")");
     }
 
     private void DrawBackendControls()
@@ -121,7 +203,7 @@ public sealed class PlatformDemo : MonoBehaviour
             Log("백엔드 인증 취소 및 로그인 상태 정리");
         }
         GUI.enabled = true;
-        GUILayout.Label("실제 PlayFab 통신 없이 인증 흐름만 재현합니다. 인증 코드 원문은 표시하지 않습니다.");
+        GUILayout.Label("실제 연결 없이 인증 흐름만 재현합니다. 인증 코드 원문은 표시하지 않습니다.");
     }
 
     private static string LoginStateLabel(BaasLoginState state)
@@ -159,6 +241,10 @@ public sealed class PlatformDemo : MonoBehaviour
             {
                 Log(op + " 취소됨");
             }
+        }
+        catch (BaasApiException error)
+        {
+            Log(op + " 실패: " + error.Code);
         }
         catch (Exception error)
         {
@@ -392,6 +478,7 @@ public sealed class PlatformDemo : MonoBehaviour
                 RunAsync("초기화", InitializeAsync).Forget();
 
             DrawBackendControls();
+            DrawBackendApiControls();
 
             GUI.enabled = platformManager != null && !busy && platformManager.Initialized;
             GUILayout.Space(8);

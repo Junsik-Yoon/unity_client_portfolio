@@ -6,7 +6,7 @@ using Cysharp.Threading.Tasks;
 namespace Portfolio.Backend
 {
     // GBaas의 플랫폼별 로그인 호출 흐름 예시
-    public sealed class MockBaas : IBaasAuth
+    public sealed partial class MockBaas : IBaasAuth, IBaasApi
     {
         public bool SimulateLoginFailure { get; set; }
 

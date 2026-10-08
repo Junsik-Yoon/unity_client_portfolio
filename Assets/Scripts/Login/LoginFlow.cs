@@ -85,6 +85,7 @@ namespace Portfolio.Login
         {
             if (disposed) return;
             disposed = true;
+            session?.Invalidate();
             session = null;
             State = BaasLoginState.SignedOut;
             lifetime.Cancel();
