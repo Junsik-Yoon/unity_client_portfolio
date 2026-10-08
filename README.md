@@ -1,4 +1,4 @@
-# Unity Client Portfolio — 윤준식
+# Unity Client Portfolio
 
 Unity 클라이언트 개발 실무에서 담당했던 **플랫폼 연동과 게임 백엔드 API 호출 흐름**을 재구성한 코드 샘플입니다.
 
