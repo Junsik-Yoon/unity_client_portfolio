@@ -1,3 +1,5 @@
+using Portfolio.Login;
+using Portfolio.Backend;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -8,13 +10,19 @@ using UnityEngine;
 // 플랫폼 통합 데모
 public sealed class PlatformDemo : MonoBehaviour
 {
-    private PlatformManager manager;
+    private PlatformManager platformManager;
+    private readonly MockBaas someBaas = new MockBaas();
+    private LoginFlow loginFlow;
+    private BaasSession BackendSession => loginFlow?.Session;
+    private BaasLoginState LoginState => loginFlow?.State ?? BaasLoginState.SignedOut;
     private readonly List<string> logs = new List<string>();
     private CancellationToken token;
     private PlatformUser user;
     private int providerIndex;
     private bool busy;
     private bool failFriends;
+    private bool failAuth;
+    private bool failBackend;
     private string status = "종료됨";
     private string statInput = "10";
     private Vector2 scroll;
@@ -43,7 +51,8 @@ public sealed class PlatformDemo : MonoBehaviour
             providerIndex = 0;
         }
 
-        manager = PlatformManager.Instance;
+        platformManager = PlatformManager.Instance;
+        platformManager.PlatformReleased += LogoutBackend;
         RunAsync("초기화", InitializeAsync).Forget();
     }
 
@@ -52,16 +61,80 @@ public sealed class PlatformDemo : MonoBehaviour
         user = null;
         status = "초기화 중";
         restrictionStatus = "검사 대기";
-        manager.ReleasePlatform();
-        manager.SelectProvider(Providers[providerIndex]);
-        await manager.InitializeAsync(token);
+        platformManager.ReleasePlatform();
+        platformManager.SelectProvider(Providers[providerIndex]);
+        await platformManager.InitializeAsync(token);
 
         Log("플랫폼 초기화 완료: " + ProviderNames[providerIndex]);
 
         user = await PlatformManager.Platform.Social.GetLocalUserAsync(token);
-        status = Providers[providerIndex] == PlatformProvider.NoPlatform ? "오프라인 준비 완료" : "로그인 완료";
+        Log("플랫폼 사용자: " + user.DisplayName + " (" + user.Id + ")");
+        await LoginBackendAsync();
+    }
 
-        Log(status + ": " + user.DisplayName + " (" + user.Id + ")");
+    private async UniTask LoginBackendAsync()
+    {
+        var platform = PlatformManager.Platform;
+        if (platform is MockPlatform mock) mock.SimulateAuthFailure = failAuth;
+        someBaas.SimulateLoginFailure = failBackend;
+        status = "플랫폼 인증 중";
+        Log("인증 시작: 플랫폼 초기화 확인 → 인증 코드 발급 → MockBaas 로그인");
+        try
+        {
+            // 상위 흐름에서 플랫폼과 백엔드를 조합한다.
+            if (loginFlow == null) loginFlow = new LoginFlow(platform, someBaas);
+            var _session = await loginFlow.LoginAsync(token);
+            status = _session == null ? "오프라인 준비 완료" : "백엔드 로그인 완료";
+            Log(_session == null ? "오프라인: 인증 코드 발급과 백엔드 로그인을 생략합니다."
+                : "MockBaas 로그인 완료 / PlayerId: " + _session.PlayerId);
+        }
+        catch (OperationCanceledException) { status = "인증 취소됨"; throw; }
+        catch { status = "인증 실패 — 옵션을 해제하고 다시 시도하세요"; throw; }
+    }
+
+    private void LogoutBackend()
+    {
+        var previous = loginFlow;
+        loginFlow = null;
+        previous?.Dispose();
+    }
+
+    private void DrawBackendControls()
+    {
+        GUILayout.Space(8);
+        GUI.enabled = true;
+        GUILayout.Label("플랫폼 인증 → MockBaas 로그인");
+        GUILayout.Label("인증 단계: " + (platformManager == null ? "대기" : LoginStateLabel(LoginState)));
+        GUILayout.Label("백엔드 사용자: " + (BackendSession?.PlayerId ?? "-"));
+        GUI.enabled = platformManager != null && !busy;
+        failAuth = GUILayout.Toggle(failAuth, "인증 코드 발급 실패 시뮬레이션");
+        failBackend = GUILayout.Toggle(failBackend, "MockBaas 로그인 실패 시뮬레이션");
+        GUI.enabled = platformManager != null && platformManager.Initialized && !busy && BackendSession == null;
+        ActionButton("백엔드 로그인 / 다시 시도", LoginBackendAsync);
+        GUI.enabled = platformManager != null && platformManager.Initialized &&
+            (BackendSession != null || LoginState == BaasLoginState.GettingAuthCode ||
+             LoginState == BaasLoginState.SigningIn);
+        if (GUILayout.Button("백엔드 로그아웃 / 진행 중 인증 취소", GUILayout.Height(34)))
+        {
+            LogoutBackend();
+            status = "플랫폼 준비 완료 / 백엔드 로그아웃";
+            Log("백엔드 인증 취소 및 로그인 상태 정리");
+        }
+        GUI.enabled = true;
+        GUILayout.Label("실제 PlayFab 통신 없이 인증 흐름만 재현합니다. 인증 코드 원문은 표시하지 않습니다.");
+    }
+
+    private static string LoginStateLabel(BaasLoginState state)
+    {
+        switch (state)
+        {
+            case BaasLoginState.GettingAuthCode: return "플랫폼 인증 코드 발급 중";
+            case BaasLoginState.SigningIn: return "MockBaas 로그인 중";
+            case BaasLoginState.SignedIn: return "백엔드 로그인 완료";
+            case BaasLoginState.Offline: return "오프라인 (백엔드 인증 생략)";
+            case BaasLoginState.Failed: return "실패 (재시도 가능)";
+            default: return "로그아웃";
+        }
     }
 
     private async UniTask RunAsync(string op, Func<UniTask> action)
@@ -89,7 +162,7 @@ public sealed class PlatformDemo : MonoBehaviour
         }
         catch (Exception error)
         {
-            if (!manager.Initialized)
+            if (!platformManager.Initialized)
             {
                 status = "초기화 실패 — 다시 시도할 수 있습니다";
             }
@@ -186,15 +259,15 @@ public sealed class PlatformDemo : MonoBehaviour
         Log("클라우드 데이터를 삭제했습니다.");
     }
 
-    private bool CanRunRestriction => manager != null && manager.Initialized &&
-        manager.RestrictQueue != null && manager.RestrictQueue.isActiveAndEnabled &&
+    private bool CanRunRestriction => platformManager != null && platformManager.Initialized &&
+        platformManager.RestrictQueue != null && platformManager.RestrictQueue.isActiveAndEnabled &&
         PlatformManager.Platform.Restriction != null;
 
     private async UniTask RunRestrictionAsync(PlatformTaskManager.COMMAND command, string label)
     {
         if (!CanRunRestriction)
             throw new InvalidOperationException("플랫폼 초기화, 작업 큐, Restriction 연결 상태를 확인해 주세요.");
-        var queue = manager.RestrictQueue;
+        var queue = platformManager.RestrictQueue;
         if (queue.IsContainWithCheckComplete(command))
         {
             restrictionStatus = label + ": 동일한 검사가 이미 대기 또는 실행 중입니다.";
@@ -215,7 +288,7 @@ public sealed class PlatformDemo : MonoBehaviour
             while (!_task.isDone)
             {
                 token.ThrowIfCancellationRequested();
-                if (queue == null || !queue.isActiveAndEnabled || manager == null || !manager.Initialized)
+                if (queue == null || !queue.isActiveAndEnabled || platformManager == null || !platformManager.Initialized)
                     throw new InvalidOperationException("검사 도중 플랫폼 또는 작업 큐가 종료되었습니다.");
                 if (queue.GetTaskById(_task.id) != _task)
                     throw new InvalidOperationException("완료 전에 작업이 큐에서 제거되었습니다.");
@@ -260,11 +333,11 @@ public sealed class PlatformDemo : MonoBehaviour
         RestrictionButton("로컬커뮤니케이션 검사", PlatformTaskManager.COMMAND.LocalCommunicate);
         GUILayout.EndHorizontal();
         GUI.enabled = true;
-        if (manager == null || !manager.Initialized)
+        if (platformManager == null || !platformManager.Initialized)
             GUILayout.Label("플랫폼 초기화 후 검사할 수 있습니다.");
         else if (PlatformManager.Platform.Restriction == null)
             GUILayout.Label("Restriction 미연결: 선택한 플랫폼에 제한 검사 구현체를 연결해 주세요.");
-        else if (manager.RestrictQueue == null || !manager.RestrictQueue.isActiveAndEnabled)
+        else if (platformManager.RestrictQueue == null || !platformManager.RestrictQueue.isActiveAndEnabled)
             GUILayout.Label("제한 검사 작업 큐가 연결되어 있지 않거나 비활성화되어 있습니다.");
         else
             GUILayout.Label("");
@@ -313,12 +386,14 @@ public sealed class PlatformDemo : MonoBehaviour
             GUILayout.Label("사용자: " + (user == null ? "-" : user.DisplayName));
             controlsScroll = GUILayout.BeginScrollView(controlsScroll, false, false);
 
-            GUI.enabled = manager != null && !busy && !manager.Initialized;
+            GUI.enabled = platformManager != null && !busy && !platformManager.Initialized;
             providerIndex = GUILayout.SelectionGrid(providerIndex, ProviderNames, 2, GUILayout.Height(68));
             if (GUILayout.Button("초기화 / 다시 시도", GUILayout.Height(34)))
                 RunAsync("초기화", InitializeAsync).Forget();
 
-            GUI.enabled = manager != null && !busy && manager.Initialized;
+            DrawBackendControls();
+
+            GUI.enabled = platformManager != null && !busy && platformManager.Initialized;
             GUILayout.Space(8);
             GUILayout.Label("사용자 · 친구");
             GUILayout.BeginHorizontal();
@@ -329,7 +404,7 @@ public sealed class PlatformDemo : MonoBehaviour
             ActionButton("프로필 열기", OpenProfileAsync);
             failFriends = GUILayout.Toggle(failFriends, "친구 조회 실패 시뮬레이션");
 
-            GUI.enabled = manager != null && !busy && manager.Initialized;
+            GUI.enabled = platformManager != null && !busy && platformManager.Initialized;
             GUILayout.Space(8);
             GUILayout.Label("스탯 · 업적");
             GUILayout.BeginHorizontal();
@@ -353,12 +428,12 @@ public sealed class PlatformDemo : MonoBehaviour
             GUILayout.EndHorizontal();
             ActionButton("클라우드 삭제", DeleteSaveAsync);
             DrawRestrictionControls();
-            GUI.enabled = manager != null && manager.Initialized && !busy &&
-                (manager.RestrictQueue == null || manager.RestrictQueue.IsEmpty);
+            GUI.enabled = platformManager != null && platformManager.Initialized && !busy &&
+                (platformManager.RestrictQueue == null || platformManager.RestrictQueue.IsEmpty);
             GUILayout.Space(8);
             if (GUILayout.Button("플랫폼 릴리즈 / 다른 플랫폼 선택", GUILayout.Height(34)))
             {
-                manager.ReleasePlatform();
+                platformManager.ReleasePlatform();
                 user = null;
                 status = "종료됨";
                 restrictionStatus = "검사 대기";
@@ -386,13 +461,12 @@ public sealed class PlatformDemo : MonoBehaviour
 
     private void OnDestroy()
     {
-        if (manager != null) manager.ReleasePlatform();
+        LogoutBackend();
+        if (platformManager != null)
+        {
+            platformManager.PlatformReleased -= LogoutBackend;
+            platformManager.ReleasePlatform();
+        }
         if (guiSkin != null) Destroy(guiSkin);
     }
 }
-
-
-
-
-
-

@@ -35,6 +35,7 @@ namespace Portfolio.Platforms
         [SerializeField] private PlatformProvider provider = PlatformProvider.MockPlatform1;
         private UniTaskCompletionSource<PlatformBase> initialization;
         private CancellationTokenSource lifetime;
+        public event Action PlatformReleased;
         public PlatformTaskManager RestrictQueue = null;
 
         public static string BasePath = null;
@@ -202,10 +203,11 @@ namespace Portfolio.Platforms
                 return;
             }
             releasing = true;
+
             var _previous = platform;
             platform = null;
             try { _previous?.Release(); }
-            finally { releasing = false; }
+            finally { releasing = false; PlatformReleased?.Invoke(); }
         }
 
         private static void SetIOBasePath()

@@ -17,6 +17,28 @@ namespace Portfolio.Platforms
         public PlatformBaseStats Stats { get; protected set; }
         public PlatformBaseCloud Cloud { get; protected set; }
         public PlatformRestriction Restriction { get; protected set; }
+        public virtual string AuthProvider => "Offline";
+        public virtual bool SupportsBackendAuth => false;
+
+        // 플랫폼 세션 종료 시 인증 발급과 백엔드 요청도 함께 취소한다.
+        internal CancellationTokenSource CreateAuthScope(CancellationToken token) => Session.CreateRequestScope(token);
+
+        public async UniTask<string> GetAuthCodeAsync(CancellationToken token)
+        {
+            using (var _scope = CreateAuthScope(token))
+            {
+                if (!SupportsBackendAuth)
+                    throw new NotSupportedException("오프라인 플랫폼은 인증 코드를 발급하지 않습니다");
+                var _autoCode = await GetAuthCodeCoreAsync(_scope.Token);
+                _scope.Token.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(_autoCode))
+                    throw new InvalidOperationException("플랫폼 인증 코드가 비어 있습니다.");
+                return _autoCode;
+            }
+        }
+
+        protected virtual UniTask<string> GetAuthCodeCoreAsync(CancellationToken token)
+            => throw new NotSupportedException("구현이 필요합니다.");
 
         public async UniTask InitializeAsync(CancellationToken token)
         {
